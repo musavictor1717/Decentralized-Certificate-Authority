@@ -7,6 +7,12 @@
 (define-constant err-already-exists (err u103))
 (define-constant err-invalid-institution (err u104))
 
+(define-constant err-unauthorized (err u200))
+(define-constant err-invalid-rating (err u202))
+(define-constant err-already-rated (err u203))
+(define-constant min-rating u1)
+(define-constant max-rating u5)
+
 (define-data-var next-certificate-id uint u1)
 
 (define-map institutions principal bool)
@@ -145,4 +151,82 @@
         total-certificates: (- (var-get next-certificate-id) u1),
         current-block:stacks-block-height
     })
+)
+
+
+
+(define-map institution-ratings principal { total-score: uint, rating-count: uint })
+(define-map certificate-ratings uint { total-score: uint, rating-count: uint })
+(define-map user-institution-ratings { user: principal, institution: principal } uint)
+(define-map user-certificate-ratings { user: principal, certificate-id: uint } uint)
+
+(define-public (rate-institution (institution principal) (rating uint))
+    (let ((existing-rating (map-get? user-institution-ratings { user: tx-sender, institution: institution }))
+          (current-stats (default-to { total-score: u0, rating-count: u0 } 
+                         (map-get? institution-ratings institution))))
+        (asserts! (and (>= rating min-rating) (<= rating max-rating)) err-invalid-rating)
+        (asserts! (is-none existing-rating) err-already-rated)
+        (map-set user-institution-ratings { user: tx-sender, institution: institution } rating)
+        (map-set institution-ratings institution {
+            total-score: (+ (get total-score current-stats) rating),
+            rating-count: (+ (get rating-count current-stats) u1)
+        })
+        (ok true)
+    )
+)
+
+(define-public (rate-certificate (certificate-id uint) (rating uint))
+    (let ((existing-rating (map-get? user-certificate-ratings { user: tx-sender, certificate-id: certificate-id }))
+          (current-stats (default-to { total-score: u0, rating-count: u0 } 
+                         (map-get? certificate-ratings certificate-id))))
+        (asserts! (and (>= rating min-rating) (<= rating max-rating)) err-invalid-rating)
+        (asserts! (is-none existing-rating) err-already-rated)
+        (map-set user-certificate-ratings { user: tx-sender, certificate-id: certificate-id } rating)
+        (map-set certificate-ratings certificate-id {
+            total-score: (+ (get total-score current-stats) rating),
+            rating-count: (+ (get rating-count current-stats) u1)
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-institution-reputation (institution principal))
+    (let ((stats (map-get? institution-ratings institution)))
+        (match stats
+            rating-data (ok {
+                average-rating: (/ (* (get total-score rating-data) u100) (get rating-count rating-data)),
+                total-ratings: (get rating-count rating-data),
+                reputation-score: (calculate-reputation-score (get total-score rating-data) (get rating-count rating-data))
+            })
+            (ok { average-rating: u0, total-ratings: u0, reputation-score: u0 })
+        )
+    )
+)
+
+(define-read-only (get-certificate-reputation (certificate-id uint))
+    (let ((stats (map-get? certificate-ratings certificate-id)))
+        (match stats
+            rating-data (ok {
+                average-rating: (/ (* (get total-score rating-data) u100) (get rating-count rating-data)),
+                total-ratings: (get rating-count rating-data),
+                reputation-score: (calculate-reputation-score (get total-score rating-data) (get rating-count rating-data))
+            })
+            (ok { average-rating: u0, total-ratings: u0, reputation-score: u0 })
+        )
+    )
+)
+
+(define-read-only (has-user-rated-institution (user principal) (institution principal))
+    (is-some (map-get? user-institution-ratings { user: user, institution: institution }))
+)
+
+(define-read-only (has-user-rated-certificate (user principal) (certificate-id uint))
+    (is-some (map-get? user-certificate-ratings { user: user, certificate-id: certificate-id }))
+)
+
+(define-private (calculate-reputation-score (total-score uint) (rating-count uint))
+    (if (> rating-count u0)
+        (+ (/ (* total-score u20) rating-count) (if (< (* rating-count u2) u40) (* rating-count u2) u40))
+        u0
+    )
 )
