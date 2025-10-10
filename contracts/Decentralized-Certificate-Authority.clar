@@ -230,3 +230,65 @@
         u0
     )
 )
+
+
+(define-map certificate-achievements uint (list 10 (string-ascii 50)))
+(define-map achievement-timestamps { certificate-id: uint, achievement: (string-ascii 50) } uint)
+
+(define-public (award-achievement (certificate-id uint) (achievement (string-ascii 50)))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+          (existing-achievements (default-to (list) (map-get? certificate-achievements certificate-id)))
+          (timestamp-key { certificate-id: certificate-id, achievement: achievement }))
+        (asserts! (is-eq tx-sender (get institution metadata)) err-not-authorized)
+        (asserts! (< (len existing-achievements) u10) err-not-authorized)
+        (asserts! (is-none (map-get? achievement-timestamps timestamp-key)) err-already-exists)
+        (map-set certificate-achievements certificate-id 
+            (unwrap! (as-max-len? (append existing-achievements achievement) u10) err-not-authorized))
+        (map-set achievement-timestamps timestamp-key stacks-block-height)
+        (ok true)
+    )
+)
+
+(define-public (revoke-achievement (certificate-id uint) (achievement (string-ascii 50)))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get institution metadata)) err-not-authorized)
+        (map-delete certificate-achievements certificate-id)
+        (map-delete achievement-timestamps { certificate-id: certificate-id, achievement: achievement })
+        (ok true)
+    )
+)
+
+(define-read-only (get-certificate-achievements (certificate-id uint))
+    (ok (default-to (list) (map-get? certificate-achievements certificate-id)))
+)
+
+(define-read-only (get-achievement-timestamp (certificate-id uint) (achievement (string-ascii 50)))
+    (ok (map-get? achievement-timestamps { certificate-id: certificate-id, achievement: achievement }))
+)
+
+(define-read-only (has-achievement (certificate-id uint) (achievement (string-ascii 50)))
+    (let ((achievements (default-to (list) (map-get? certificate-achievements certificate-id))))
+        (ok (is-some (index-of achievements achievement)))
+    )
+)
+
+(define-read-only (get-enhanced-certificate-info (certificate-id uint))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+          (owner (unwrap! (nft-get-owner? academic-certificate certificate-id) err-not-found))
+          (achievements (default-to (list) (map-get? certificate-achievements certificate-id))))
+        (ok {
+            certificate-id: certificate-id,
+            student-name: (get student-name metadata),
+            institution: (get institution metadata),
+            degree-type: (get degree-type metadata),
+            major: (get major metadata),
+            graduation-year: (get graduation-year metadata),
+            gpa: (get gpa metadata),
+            issued-at: (get issued-at metadata),
+            current-owner: owner,
+            achievements: achievements,
+            achievement-count: (len achievements),
+            is-revoked: (default-to false (map-get? revoked-certificates certificate-id))
+        })
+    )
+)
