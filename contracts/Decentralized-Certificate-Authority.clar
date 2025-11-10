@@ -1,0 +1,362 @@
+(define-non-fungible-token academic-certificate uint)
+
+(define-constant contract-owner tx-sender)
+(define-constant err-owner-only (err u100))
+(define-constant err-not-found (err u101))
+(define-constant err-not-authorized (err u102))
+(define-constant err-already-exists (err u103))
+(define-constant err-invalid-institution (err u104))
+
+(define-constant err-unauthorized (err u200))
+(define-constant err-invalid-rating (err u202))
+(define-constant err-already-rated (err u203))
+(define-constant min-rating u1)
+(define-constant max-rating u5)
+
+(define-constant err-self-endorsement (err u204))
+(define-constant err-already-endorsed (err u205))
+(define-constant max-endorsements-per-certificate u50)
+
+(define-data-var next-certificate-id uint u1)
+
+(define-map institutions principal bool)
+(define-map certificate-metadata uint {
+    student-name: (string-ascii 100),
+    institution: principal,
+    degree-type: (string-ascii 50),
+    major: (string-ascii 80),
+    graduation-year: uint,
+    gpa: uint,
+    issued-at: uint
+})
+(define-map institution-names principal (string-ascii 100))
+(define-map revoked-certificates uint bool)
+
+(define-public (register-institution (institution principal) (name (string-ascii 100)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set institutions institution true)
+        (map-set institution-names institution name)
+        (ok true)
+    )
+)
+
+(define-public (revoke-institution (institution principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-delete institutions institution)
+        (map-delete institution-names institution)
+        (ok true)
+    )
+)
+
+(define-public (issue-certificate 
+    (recipient principal)
+    (student-name (string-ascii 100))
+    (degree-type (string-ascii 50))
+    (major (string-ascii 80))
+    (graduation-year uint)
+    (gpa uint))
+    (let ((certificate-id (var-get next-certificate-id))
+          (current-block stacks-block-height))
+        (asserts! (default-to false (map-get? institutions tx-sender)) err-not-authorized)
+        (try! (nft-mint? academic-certificate certificate-id recipient))
+        (map-set certificate-metadata certificate-id {
+            student-name: student-name,
+            institution: tx-sender,
+            degree-type: degree-type,
+            major: major,
+            graduation-year: graduation-year,
+            gpa: gpa,
+            issued-at: current-block
+        })
+        (var-set next-certificate-id (+ certificate-id u1))
+        (ok certificate-id)
+    )
+)
+
+(define-public (revoke-certificate (certificate-id uint))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get institution metadata)) err-not-authorized)
+        (map-set revoked-certificates certificate-id true)
+        (ok true)
+    )
+)
+
+(define-public (transfer-certificate (certificate-id uint) (sender principal) (recipient principal))
+    (begin
+        (asserts! (is-eq tx-sender sender) err-not-authorized)
+        (asserts! (not (default-to false (map-get? revoked-certificates certificate-id))) err-not-authorized)
+        (try! (nft-transfer? academic-certificate certificate-id sender recipient))
+        (ok true)
+    )
+)
+
+(define-read-only (get-certificate-metadata (certificate-id uint))
+    (map-get? certificate-metadata certificate-id)
+)
+
+(define-read-only (get-certificate-owner (certificate-id uint))
+    (nft-get-owner? academic-certificate certificate-id)
+)
+
+(define-read-only (is-certificate-revoked (certificate-id uint))
+    (default-to false (map-get? revoked-certificates certificate-id))
+)
+
+(define-read-only (is-authorized-institution (institution principal))
+    (default-to false (map-get? institutions institution))
+)
+
+(define-read-only (get-institution-name (institution principal))
+    (map-get? institution-names institution)
+)
+
+(define-read-only (verify-certificate (certificate-id uint))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+          (owner (unwrap! (nft-get-owner? academic-certificate certificate-id) err-not-found)))
+        (ok {
+            certificate-id: certificate-id,
+            student-name: (get student-name metadata),
+            institution: (get institution metadata),
+            institution-name: (default-to "Unknown Institution" (map-get? institution-names (get institution metadata))),
+            degree-type: (get degree-type metadata),
+            major: (get major metadata),
+            graduation-year: (get graduation-year metadata),
+            gpa: (get gpa metadata),
+            issued-at: (get issued-at metadata),
+            current-owner: owner,
+            is-revoked: (default-to false (map-get? revoked-certificates certificate-id)),
+            is-institution-authorized: (default-to false (map-get? institutions (get institution metadata)))
+        })
+    )
+)
+
+(define-read-only (get-certificates-by-owner (owner principal))
+    (ok (map get-certificate-metadata 
+        (filter is-owner-certificate 
+            (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10))))
+)
+
+(define-private (is-owner-certificate (certificate-id uint))
+    (match (nft-get-owner? academic-certificate certificate-id)
+        owner true
+        false
+    )
+)
+
+(define-read-only (get-total-certificates)
+    (- (var-get next-certificate-id) u1)
+)
+
+(define-read-only (get-contract-info)
+    (ok {
+        contract-owner: contract-owner,
+        total-certificates: (- (var-get next-certificate-id) u1),
+        current-block:stacks-block-height
+    })
+)
+
+
+
+(define-map institution-ratings principal { total-score: uint, rating-count: uint })
+(define-map certificate-ratings uint { total-score: uint, rating-count: uint })
+(define-map user-institution-ratings { user: principal, institution: principal } uint)
+(define-map user-certificate-ratings { user: principal, certificate-id: uint } uint)
+
+(define-public (rate-institution (institution principal) (rating uint))
+    (let ((existing-rating (map-get? user-institution-ratings { user: tx-sender, institution: institution }))
+          (current-stats (default-to { total-score: u0, rating-count: u0 } 
+                         (map-get? institution-ratings institution))))
+        (asserts! (and (>= rating min-rating) (<= rating max-rating)) err-invalid-rating)
+        (asserts! (is-none existing-rating) err-already-rated)
+        (map-set user-institution-ratings { user: tx-sender, institution: institution } rating)
+        (map-set institution-ratings institution {
+            total-score: (+ (get total-score current-stats) rating),
+            rating-count: (+ (get rating-count current-stats) u1)
+        })
+        (ok true)
+    )
+)
+
+(define-public (rate-certificate (certificate-id uint) (rating uint))
+    (let ((existing-rating (map-get? user-certificate-ratings { user: tx-sender, certificate-id: certificate-id }))
+          (current-stats (default-to { total-score: u0, rating-count: u0 } 
+                         (map-get? certificate-ratings certificate-id))))
+        (asserts! (and (>= rating min-rating) (<= rating max-rating)) err-invalid-rating)
+        (asserts! (is-none existing-rating) err-already-rated)
+        (map-set user-certificate-ratings { user: tx-sender, certificate-id: certificate-id } rating)
+        (map-set certificate-ratings certificate-id {
+            total-score: (+ (get total-score current-stats) rating),
+            rating-count: (+ (get rating-count current-stats) u1)
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-institution-reputation (institution principal))
+    (let ((stats (map-get? institution-ratings institution)))
+        (match stats
+            rating-data (ok {
+                average-rating: (/ (* (get total-score rating-data) u100) (get rating-count rating-data)),
+                total-ratings: (get rating-count rating-data),
+                reputation-score: (calculate-reputation-score (get total-score rating-data) (get rating-count rating-data))
+            })
+            (ok { average-rating: u0, total-ratings: u0, reputation-score: u0 })
+        )
+    )
+)
+
+(define-read-only (get-certificate-reputation (certificate-id uint))
+    (let ((stats (map-get? certificate-ratings certificate-id)))
+        (match stats
+            rating-data (ok {
+                average-rating: (/ (* (get total-score rating-data) u100) (get rating-count rating-data)),
+                total-ratings: (get rating-count rating-data),
+                reputation-score: (calculate-reputation-score (get total-score rating-data) (get rating-count rating-data))
+            })
+            (ok { average-rating: u0, total-ratings: u0, reputation-score: u0 })
+        )
+    )
+)
+
+(define-read-only (has-user-rated-institution (user principal) (institution principal))
+    (is-some (map-get? user-institution-ratings { user: user, institution: institution }))
+)
+
+(define-read-only (has-user-rated-certificate (user principal) (certificate-id uint))
+    (is-some (map-get? user-certificate-ratings { user: user, certificate-id: certificate-id }))
+)
+
+(define-private (calculate-reputation-score (total-score uint) (rating-count uint))
+    (if (> rating-count u0)
+        (+ (/ (* total-score u20) rating-count) (if (< (* rating-count u2) u40) (* rating-count u2) u40))
+        u0
+    )
+)
+
+
+(define-map certificate-achievements uint (list 10 (string-ascii 50)))
+(define-map achievement-timestamps { certificate-id: uint, achievement: (string-ascii 50) } uint)
+
+(define-public (award-achievement (certificate-id uint) (achievement (string-ascii 50)))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+          (existing-achievements (default-to (list) (map-get? certificate-achievements certificate-id)))
+          (timestamp-key { certificate-id: certificate-id, achievement: achievement }))
+        (asserts! (is-eq tx-sender (get institution metadata)) err-not-authorized)
+        (asserts! (< (len existing-achievements) u10) err-not-authorized)
+        (asserts! (is-none (map-get? achievement-timestamps timestamp-key)) err-already-exists)
+        (map-set certificate-achievements certificate-id 
+            (unwrap! (as-max-len? (append existing-achievements achievement) u10) err-not-authorized))
+        (map-set achievement-timestamps timestamp-key stacks-block-height)
+        (ok true)
+    )
+)
+
+(define-public (revoke-achievement (certificate-id uint) (achievement (string-ascii 50)))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get institution metadata)) err-not-authorized)
+        (map-delete certificate-achievements certificate-id)
+        (map-delete achievement-timestamps { certificate-id: certificate-id, achievement: achievement })
+        (ok true)
+    )
+)
+
+(define-read-only (get-certificate-achievements (certificate-id uint))
+    (ok (default-to (list) (map-get? certificate-achievements certificate-id)))
+)
+
+(define-read-only (get-achievement-timestamp (certificate-id uint) (achievement (string-ascii 50)))
+    (ok (map-get? achievement-timestamps { certificate-id: certificate-id, achievement: achievement }))
+)
+
+(define-read-only (has-achievement (certificate-id uint) (achievement (string-ascii 50)))
+    (let ((achievements (default-to (list) (map-get? certificate-achievements certificate-id))))
+        (ok (is-some (index-of achievements achievement)))
+    )
+)
+
+(define-read-only (get-enhanced-certificate-info (certificate-id uint))
+    (let ((metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+          (owner (unwrap! (nft-get-owner? academic-certificate certificate-id) err-not-found))
+          (achievements (default-to (list) (map-get? certificate-achievements certificate-id))))
+        (ok {
+            certificate-id: certificate-id,
+            student-name: (get student-name metadata),
+            institution: (get institution metadata),
+            degree-type: (get degree-type metadata),
+            major: (get major metadata),
+            graduation-year: (get graduation-year metadata),
+            gpa: (get gpa metadata),
+            issued-at: (get issued-at metadata),
+            current-owner: owner,
+            achievements: achievements,
+            achievement-count: (len achievements),
+            is-revoked: (default-to false (map-get? revoked-certificates certificate-id))
+        })
+    )
+)
+
+(define-map certificate-endorsements uint (list 50 principal))
+(define-map endorsement-messages { certificate-id: uint, endorser: principal } (string-ascii 200))
+(define-map endorsement-timestamps { certificate-id: uint, endorser: principal } uint)
+(define-map user-endorsement-count principal uint)
+
+(define-public (endorse-certificate (certificate-id uint) (message (string-ascii 200)))
+    (let (
+        (metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+        (owner (unwrap! (nft-get-owner? academic-certificate certificate-id) err-not-found))
+        (current-endorsements (default-to (list) (map-get? certificate-endorsements certificate-id)))
+        (endorser-key { certificate-id: certificate-id, endorser: tx-sender })
+        (user-count (default-to u0 (map-get? user-endorsement-count tx-sender)))
+    )
+        (asserts! (not (is-eq tx-sender owner)) err-self-endorsement)
+        (asserts! (is-none (map-get? endorsement-messages endorser-key)) err-already-endorsed)
+        (asserts! (< (len current-endorsements) max-endorsements-per-certificate) err-not-authorized)
+        (map-set certificate-endorsements certificate-id 
+            (unwrap! (as-max-len? (append current-endorsements tx-sender) u50) err-not-authorized))
+        (map-set endorsement-messages endorser-key message)
+        (map-set endorsement-timestamps endorser-key stacks-block-height)
+        (map-set user-endorsement-count tx-sender (+ user-count u1))
+        (ok true)
+    )
+)
+
+(define-public (revoke-endorsement (certificate-id uint))
+    (let (
+        (endorser-key { certificate-id: certificate-id, endorser: tx-sender })
+        (user-count (default-to u0 (map-get? user-endorsement-count tx-sender)))
+    )
+        (asserts! (is-some (map-get? endorsement-messages endorser-key)) err-not-found)
+        (map-delete endorsement-messages endorser-key)
+        (map-delete endorsement-timestamps endorser-key)
+        (map-set user-endorsement-count tx-sender (if (> user-count u0) (- user-count u1) u0))
+        (ok true)
+    )
+)
+
+(define-read-only (get-certificate-endorsements (certificate-id uint))
+    (ok (default-to (list) (map-get? certificate-endorsements certificate-id)))
+)
+
+(define-read-only (get-endorsement-details (certificate-id uint) (endorser principal))
+    (let ((endorser-key { certificate-id: certificate-id, endorser: endorser }))
+        (ok {
+            message: (map-get? endorsement-messages endorser-key),
+            timestamp: (map-get? endorsement-timestamps endorser-key),
+            endorser: endorser
+        })
+    )
+)
+
+(define-read-only (get-endorsement-count (certificate-id uint))
+    (ok (len (default-to (list) (map-get? certificate-endorsements certificate-id))))
+)
+
+(define-read-only (has-endorsed (certificate-id uint) (endorser principal))
+    (is-some (map-get? endorsement-messages { certificate-id: certificate-id, endorser: endorser }))
+)
+
+(define-read-only (get-user-total-endorsements (user principal))
+    (ok (default-to u0 (map-get? user-endorsement-count user)))
+)
