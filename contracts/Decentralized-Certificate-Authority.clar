@@ -13,6 +13,10 @@
 (define-constant min-rating u1)
 (define-constant max-rating u5)
 
+(define-constant err-self-endorsement (err u204))
+(define-constant err-already-endorsed (err u205))
+(define-constant max-endorsements-per-certificate u50)
+
 (define-data-var next-certificate-id uint u1)
 
 (define-map institutions principal bool)
@@ -291,4 +295,68 @@
             is-revoked: (default-to false (map-get? revoked-certificates certificate-id))
         })
     )
+)
+
+(define-map certificate-endorsements uint (list 50 principal))
+(define-map endorsement-messages { certificate-id: uint, endorser: principal } (string-ascii 200))
+(define-map endorsement-timestamps { certificate-id: uint, endorser: principal } uint)
+(define-map user-endorsement-count principal uint)
+
+(define-public (endorse-certificate (certificate-id uint) (message (string-ascii 200)))
+    (let (
+        (metadata (unwrap! (map-get? certificate-metadata certificate-id) err-not-found))
+        (owner (unwrap! (nft-get-owner? academic-certificate certificate-id) err-not-found))
+        (current-endorsements (default-to (list) (map-get? certificate-endorsements certificate-id)))
+        (endorser-key { certificate-id: certificate-id, endorser: tx-sender })
+        (user-count (default-to u0 (map-get? user-endorsement-count tx-sender)))
+    )
+        (asserts! (not (is-eq tx-sender owner)) err-self-endorsement)
+        (asserts! (is-none (map-get? endorsement-messages endorser-key)) err-already-endorsed)
+        (asserts! (< (len current-endorsements) max-endorsements-per-certificate) err-not-authorized)
+        (map-set certificate-endorsements certificate-id 
+            (unwrap! (as-max-len? (append current-endorsements tx-sender) u50) err-not-authorized))
+        (map-set endorsement-messages endorser-key message)
+        (map-set endorsement-timestamps endorser-key stacks-block-height)
+        (map-set user-endorsement-count tx-sender (+ user-count u1))
+        (ok true)
+    )
+)
+
+(define-public (revoke-endorsement (certificate-id uint))
+    (let (
+        (endorser-key { certificate-id: certificate-id, endorser: tx-sender })
+        (user-count (default-to u0 (map-get? user-endorsement-count tx-sender)))
+    )
+        (asserts! (is-some (map-get? endorsement-messages endorser-key)) err-not-found)
+        (map-delete endorsement-messages endorser-key)
+        (map-delete endorsement-timestamps endorser-key)
+        (map-set user-endorsement-count tx-sender (if (> user-count u0) (- user-count u1) u0))
+        (ok true)
+    )
+)
+
+(define-read-only (get-certificate-endorsements (certificate-id uint))
+    (ok (default-to (list) (map-get? certificate-endorsements certificate-id)))
+)
+
+(define-read-only (get-endorsement-details (certificate-id uint) (endorser principal))
+    (let ((endorser-key { certificate-id: certificate-id, endorser: endorser }))
+        (ok {
+            message: (map-get? endorsement-messages endorser-key),
+            timestamp: (map-get? endorsement-timestamps endorser-key),
+            endorser: endorser
+        })
+    )
+)
+
+(define-read-only (get-endorsement-count (certificate-id uint))
+    (ok (len (default-to (list) (map-get? certificate-endorsements certificate-id))))
+)
+
+(define-read-only (has-endorsed (certificate-id uint) (endorser principal))
+    (is-some (map-get? endorsement-messages { certificate-id: certificate-id, endorser: endorser }))
+)
+
+(define-read-only (get-user-total-endorsements (user principal))
+    (ok (default-to u0 (map-get? user-endorsement-count user)))
 )
